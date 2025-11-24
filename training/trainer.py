@@ -83,6 +83,13 @@ class Trainer:
         # Create checkpoint directory
         self.checkpoint_dir = self.output_dir / 'checkpoints'
         self.checkpoint_dir.mkdir(exist_ok=True)
+
+        # if use latent diffusion
+        self.use_latent_diffusion = getattr(model, 'use_latent_diffusion', False)
+        if self.use_latent_diffusion:
+            print(f"Using latent diffusion with VAE")
+            print(f"  Data channels: {model.total_data_channels}")
+            print(f"  Latent channels: {model.total_channels}")
         
     def _create_ema_model(self) -> nn.Module:
         """Create EMA version of the model."""
@@ -125,7 +132,8 @@ class Trainer:
         device = x_0.device
         task_id = sample_random_task(
             self.model.num_modalities,
-            exclude_empty=False
+            exclude_empty=True,
+            exclude_full=True,
         )
         task_mask = task_to_binary_mask(task_id, self.model.num_modalities)
         task_mask = task_mask.unsqueeze(0).expand(batch_size, -1).to(device)

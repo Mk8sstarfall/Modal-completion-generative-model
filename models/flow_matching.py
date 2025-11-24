@@ -7,7 +7,7 @@ Reference: "Flow Matching for Generative Modeling" (Lipman et al., 2023)
 
 import torch
 import torch.nn as nn
-from typing import Dict, Any, Optional, Callable, Union
+from typing import Dict, Any, Optional, Callable, Union, List
 from .base_model import BaseGenerativeModel
 from utils.modal_utils import (
     task_to_binary_mask, 
@@ -30,6 +30,8 @@ class FlowMatchingModel(BaseGenerativeModel):
                  channels_per_modality: Union[int, list[int], torch.Tensor],
                  sigma_min: float = 1e-4,
                  path_type: str = 'linear',
+                 vae: Optional[nn.Module] = None,
+                 data_channels_per_modality: Optional[Union[int, List[int]]] = None,
                  **kwargs):
         """
         Initialize Flow Matching model.
@@ -45,7 +47,7 @@ class FlowMatchingModel(BaseGenerativeModel):
                 - 'vp_simple': simplified VP with sigma_min
             **kwargs: Additional parameters
         """
-        super().__init__(backbone, num_modalities, channels_per_modality, **kwargs)
+        super().__init__(backbone, num_modalities, channels_per_modality, vae, data_channels_per_modality, **kwargs)
         self.sigma_min = sigma_min
         self.path_type = path_type
         
@@ -105,7 +107,7 @@ class FlowMatchingModel(BaseGenerativeModel):
         return prediction
     
     def compute_loss(self,
-                    x_0: torch.Tensor,
+                    x_0: torch.Tensor, # data space
                     task_id: Optional[int] = None,
                     task_mask: Optional[torch.Tensor] = None,
                     **kwargs) -> Dict[str, torch.Tensor]:
@@ -126,6 +128,10 @@ class FlowMatchingModel(BaseGenerativeModel):
         """
         batch_size = x_0.shape[0]
         device = x_0.device
+
+        # encode to latent space if using VAE
+        with torch.no_grad():
+            z_0 = self.encode_to_latent(x_0)
         
         # Sample or use provided task mask
         if task_mask is None:
@@ -138,37 +144,37 @@ class FlowMatchingModel(BaseGenerativeModel):
         t = torch.rand(batch_size, device=device)
         
         # Sample noise
-        x_1 = torch.randn_like(x_0)
+        z_1 = torch.randn_like(z_0)
         
         # Compute interpolated state and velocity based on path type
-        t_expanded = t.view(batch_size, *([1] * (x_0.dim() - 1)))
+        t_expanded = t.view(batch_size, *([1] * (z_0.dim() - 1)))
         
         if self.path_type == 'linear':
             # Standard linear interpolation
-            x_t = (1 - t_expanded) * x_1 + t_expanded * x_0
-            u_t = x_0 - x_1
+            z_t = (1 - t_expanded) * z_1 + t_expanded * z_0
+            u_t = z_0 - z_1
             
         elif self.path_type == 'vp_simple':
             # Simplified variance-preserving with sigma_min
             sigma_t = 1 - (1 - self.sigma_min) * t_expanded
-            x_t = t_expanded * x_0 + sigma_t * x_1
-            u_t = x_0 - (1 - self.sigma_min) * x_1
+            z_t = t_expanded * z_0 + sigma_t * z_1
+            u_t = z_0 - (1 - self.sigma_min) * z_1
             
         elif self.path_type == 'vp':
             # Variance-preserving path (similar to DDPM)
             alpha_t = torch.cos(t_expanded * torch.pi / 2)
             sigma_t = torch.sin(t_expanded * torch.pi / 2)
-            x_t = alpha_t * x_0 + sigma_t * x_1
-            u_t = -torch.pi / 2 * (torch.sin(t_expanded * torch.pi / 2) * x_0 - 
-                                    torch.cos(t_expanded * torch.pi / 2) * x_1)
+            z_t = alpha_t * z_0 + sigma_t * z_1
+            u_t = -torch.pi / 2 * (torch.sin(t_expanded * torch.pi / 2) * z_0 - 
+                                    torch.cos(t_expanded * torch.pi / 2) * z_1)
         else:
             raise ValueError(f"Unknown path_type: {self.path_type}")
         
         # Combine clean and noisy data based on task mask
-        x_input = combine_modalities(x_0, x_t, task_mask, channels_per_modality=self.channels_per_modality)
+        z_input = combine_modalities(z_0, z_t, task_mask, channels_per_modality=self.channels_per_modality)
         
         # Predict velocity
-        v_pred = self.forward(x_input, t, task_mask, task_id=task_id)
+        v_pred = self.forward(z_input, t, task_mask, task_id=task_id)
         
         # Compute loss only on generation modalities
         loss_mask = task_mask.float()
@@ -177,9 +183,10 @@ class FlowMatchingModel(BaseGenerativeModel):
             loss_mask = loss_mask.repeat_interleave(repeats, dim=1)
         else:
             loss_mask = loss_mask.repeat_interleave(self.channels_per_modality, dim=1)
-        for _ in range(x_0.dim() - 2):
+
+        for _ in range(z_0.dim() - 2):
             loss_mask = loss_mask.unsqueeze(-1)
-        loss_mask = loss_mask.expand_as(x_0)
+        loss_mask = loss_mask.expand_as(z_0)
         
         # MSE loss weighted by task mask
         mse_loss = ((v_pred - u_t) ** 2) * loss_mask
@@ -192,11 +199,12 @@ class FlowMatchingModel(BaseGenerativeModel):
     
     @torch.no_grad()
     def sample(self,
-              x_condition: torch.Tensor,
+              x_condition: torch.Tensor, # data space
               task_mask: torch.Tensor,
               task_id: Optional[int] = None,
               num_steps: int = 50,
               method: str = 'euler',
+              return_latent: bool = False, # if return latent
               **kwargs) -> torch.Tensor:
         """
         Generate samples using ODE integration.
@@ -214,10 +222,14 @@ class FlowMatchingModel(BaseGenerativeModel):
         """
         batch_size = x_condition.shape[0]
         device = x_condition.device
+
+        # encode condition to latent space
+        with torch.no_grad():
+            z_condition = self.encode_to_latent(x_condition)
         
         # Start from noise
-        x_t = torch.randn_like(x_condition)
-        x_t = combine_modalities(x_condition, x_t, task_mask, channels_per_modality=self.channels_per_modality)
+        z_t = torch.randn_like(z_condition)
+        z_t = combine_modalities(z_condition, z_t, task_mask, channels_per_modality=self.channels_per_modality)
         
         # Time steps
         dt = 1.0 / num_steps
@@ -227,36 +239,40 @@ class FlowMatchingModel(BaseGenerativeModel):
             
             if method == 'euler':
                 # Euler method
-                v_t = self.forward(x_t, t, task_mask, task_id=task_id)
-                x_t_next = x_t + dt * v_t
+                v_t = self.forward(z_t, t, task_mask, task_id=task_id)
+                z_t_next = z_t + dt * v_t
                 
             elif method == 'heun':
                 # Heun's method (2nd order)
-                v_t = self.forward(x_t, t, task_mask, task_id=task_id)
-                x_t_pred = x_t + dt * v_t
+                v_t = self.forward(z_t, t, task_mask, task_id=task_id)
+                z_t_pred = z_t + dt * v_t
                 
                 t_next = t + dt
-                v_t_next = self.forward(x_t_pred, t_next, task_mask, task_id=task_id)
-                x_t_next = x_t + dt * (v_t + v_t_next) / 2
+                v_t_next = self.forward(z_t_pred, t_next, task_mask, task_id=task_id)
+                z_t_next = z_t + dt * (v_t + v_t_next) / 2
                 
             elif method == 'rk4':
                 # 4th order Runge-Kutta
                 t_half = t + dt / 2
                 t_next = t + dt
                 
-                k1 = self.forward(x_t, t, task_mask, task_id=task_id)
-                k2 = self.forward(x_t + dt * k1 / 2, t_half, task_mask, task_id=task_id)
-                k3 = self.forward(x_t + dt * k2 / 2, t_half, task_mask, task_id=task_id)
-                k4 = self.forward(x_t + dt * k3, t_next, task_mask, task_id=task_id)
+                k1 = self.forward(z_t, t, task_mask, task_id=task_id)
+                k2 = self.forward(z_t + dt * k1 / 2, t_half, task_mask, task_id=task_id)
+                k3 = self.forward(z_t + dt * k2 / 2, t_half, task_mask, task_id=task_id)
+                k4 = self.forward(z_t + dt * k3, t_next, task_mask, task_id=task_id)
                 
-                x_t_next = x_t + dt * (k1 + 2*k2 + 2*k3 + k4) / 6
+                z_t_next = z_t + dt * (k1 + 2*k2 + 2*k3 + k4) / 6
             else:
                 raise ValueError(f"Unknown method: {method}")
             
             # Keep condition modalities unchanged
-            x_t = combine_modalities(x_condition, x_t_next, task_mask, channels_per_modality=self.channels_per_modality)
+            z_t = combine_modalities(z_condition, z_t_next, task_mask, channels_per_modality=self.channels_per_modality)
         
-        return x_t
+        if return_latent:
+            return z_t
+
+        # decode back to data space
+        return self.decode_from_latent(z_t)
     
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration."""

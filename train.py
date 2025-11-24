@@ -8,12 +8,19 @@ Example usage:
     # Train with BraTS data
     python train.py --model_type flow --num_modalities 4 --epochs 100 \
         --dataset_type brats --data_root /path/to/brats --target_size 80 80 80
+    
+    # Train with YAML config file
+    python train.py --config config_default.yaml
+    
+    # Train with config file and override specific arguments
+    python train.py --config config_default.yaml --batch_size 64 --epochs 200
 """
 
 import argparse
 import inspect
 import importlib
 from typing import Dict, Any, Type
+import yaml
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
@@ -21,7 +28,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from diffusers import UNet2DModel
 
-from models import FlowMatchingModel, DDPMModel
+from models import FlowMatchingModel, DDPMModel, MultiModalVAE
 import data
 from training import Trainer
 
@@ -133,11 +140,41 @@ def create_model(args):
     Returns:
         Model instance
     """
+    vae = None
+    data_channels_per_modality = args.channels_per_modality
+    model_channels_per_modality = args.channels_per_modality
+    
+    if args.use_vae:
+        from diffusers import AutoencoderKL
+        if isinstance(args.vae_path, list):
+            vae_list = [AutoencoderKL.from_pretrained(path, subfolder='vae') for path in args.vae_path]
+            vae = MultiModalVAE(
+                vae=vae_list,
+                num_modalities=args.num_modalities,
+                data_channels_per_modality=data_channels_per_modality,
+                latent_channels_per_modality=model_channels_per_modality,
+                share_vae=False,
+            )
+        else:
+            vae = AutoencoderKL.from_pretrained(args.vae_path, subfolder='vae')
+            vae = MultiModalVAE(
+                vae=vae,
+                num_modalities=args.num_modalities,
+                data_channels_per_modality=data_channels_per_modality,
+                latent_channels_per_modality=model_channels_per_modality,
+                share_vae=False,
+            )
+        vae.eval()
+        for param in vae.parameters():
+            param.requires_grad = False
+        
+        model_channels_per_modality = args.latent_channels_per_modality
+
     # Calculate total channels
-    if isinstance(args.channels_per_modality, int):
-        total_channels = args.num_modalities * args.channels_per_modality
+    if isinstance(model_channels_per_modality, int):
+        total_channels = args.num_modalities * model_channels_per_modality
     else:
-        total_channels = sum(args.channels_per_modality)
+        total_channels = sum(model_channels_per_modality)
     
     # Create backbone
     backbone = create_unet_backbone(
@@ -153,18 +190,22 @@ def create_model(args):
         model = FlowMatchingModel(
             backbone=backbone,
             num_modalities=args.num_modalities,
-            channels_per_modality=args.channels_per_modality,
+            channels_per_modality=model_channels_per_modality,
             sigma_min=args.sigma_min,
             path_type=args.path_type,
+            vae=vae,
+            data_channels_per_modality=data_channels_per_modality if args.use_vae else None,
         )
     elif args.model_type == 'ddpm':
         model = DDPMModel(
             backbone=backbone,
             num_modalities=args.num_modalities,
-            channels_per_modality=args.channels_per_modality,
+            channels_per_modality=args.model_channels_per_modality,
             num_train_timesteps=args.num_timesteps,
             beta_schedule=args.beta_schedule,
             prediction_type=args.prediction_type,
+            vae=vae,
+            data_channels_per_modality=data_channels_per_modality if args.use_vae else None,
         )
     else:
         raise ValueError(f"Unknown model type: {args.model_type}")
@@ -323,6 +364,42 @@ def parse_channel_value(value):
         raise
 
 
+def parse_vae_path(value):
+    if isinstance(value, str):
+        return value
+    try:
+        if value.startswith('[') and value.endswith(']'):
+            value = value[1:-1]
+        values = [x.strip() for x in value.split(',')]
+        return values if len(values) > 1 else values[0]
+    except:
+        raise
+
+
+def load_yaml_config(config_path: str) -> Dict[str, Any]:
+    """
+    Load configuration from a YAML file.
+    
+    Args:
+        config_path: Path to the YAML configuration file
+        
+    Returns:
+        Flattened dictionary of configuration parameters
+    """
+    with open(config_path, 'r') as f:
+        config = yaml.safe_load(f)
+    
+    # Flatten nested configuration
+    flat_config = {}
+    for section, params in config.items():
+        if isinstance(params, dict):
+            flat_config.update(params)
+        else:
+            flat_config[section] = params
+    
+    return flat_config
+
+
 def setup_parser():
     """Setup argument parser with dynamically discovered datasets."""
     parser = argparse.ArgumentParser(
@@ -339,7 +416,7 @@ def setup_parser():
     dataset_group.add_argument(
         '--dataset_type', 
         type=str, 
-        default='syntheticmodal',
+        default='brats',
         choices=dataset_choices if dataset_choices else None,
         help=f'Type of dataset to use. Available: {", ".join(dataset_choices)}'
     )
@@ -368,6 +445,15 @@ def setup_parser():
                             help='U-Net block output channels')
     model_group.add_argument('--attention_head_dim', type=int, default=8,
                             help='Attention head dimension')
+    
+    # VAE arguments
+    vae_group = parser.add_argument_group('VAE (Latent Diffusion)')
+    vae_group.add_argument('--use_vae', action='store_true',
+                          help='Use VAE for latent diffusion')
+    vae_group.add_argument('--vae_path', type=parse_vae_path, default=None,
+                          help='Path to pretrained VAE')
+    vae_group.add_argument('--latent_channels_per_modality', type=parse_channel_value, 
+                          default=4, help='Latent channels per modality')
     
     # Flow Matching specific
     flow_group = parser.add_argument_group('Flow Matching')
@@ -428,14 +514,33 @@ def setup_parser():
                             help='Random seed')
     other_group.add_argument('--resume_from', type=str, default=None,
                             help='Path to checkpoint to resume from')
+    other_group.add_argument('--config', type=str, default=None,
+                            help='Path to YAML configuration file')
     
     return parser
 
 
 def parse_args():
-    """Parse command line arguments."""
+    """Parse command line arguments with optional YAML config support."""
     parser = setup_parser()
+    
+    # First parse to check for config file
+    args, remaining = parser.parse_known_args()
+    
+    # If config file specified, load it and set as defaults
+    if args.config is not None:
+        config = load_yaml_config(args.config)
+        
+        # Handle special cases for list arguments
+        if 'unet_channels' in config and isinstance(config['unet_channels'], list):
+            config['unet_channels'] = config['unet_channels']
+        
+        # Set defaults from config file
+        parser.set_defaults(**config)
+    
+    # Re-parse with updated defaults (command line args override config file)
     args = parser.parse_args()
+    
     return args
 
 

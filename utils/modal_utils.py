@@ -52,15 +52,15 @@ def binary_mask_to_task(mask: torch.Tensor) -> int:
 
 
 def sample_random_task(num_modalities: int, 
-                      exclude_empty: bool = True,
-                      exclude_full: bool = False) -> int:
+                      exclude_empty: bool = False,
+                      exclude_full: bool = True) -> int:
     """
     Sample a random generation task.
     
     Args:
         num_modalities: Total number of modalities
-        exclude_empty: If True, exclude task 0 (pure generation, no conditions)
-        exclude_full: If True, exclude task 2^n-1 (all modalities as conditions)
+        exclude_empty: If True, exclude task 0 (all modalities as conditions)
+        exclude_full: If True, exclude task 2^n-1 (pure generation, no conditions)
         
     Returns:
         Random task ID

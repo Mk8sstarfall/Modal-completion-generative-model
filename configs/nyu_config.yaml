@@ -1,0 +1,62 @@
+# Multi-modal Completion Model Training Configuration
+# 用法: python train.py --config config_default.yaml
+
+# ============== Dataset ==============
+dataset:
+  dataset_type: nyudepthv2          # 可选: brats, nyudepthv2 等
+  data_root: nyu_data     # 数据集根目录
+  image_size: 64               # 图像尺寸
+
+# ============== Model ==============
+model:
+  model_type: flow             # 可选: flow, ddpm
+  num_modalities: 2            # 模态数量
+  channels_per_modality: [3, 1]     # 每个模态的通道数
+  unet_channels:               # U-Net 各层通道数
+    - 64
+    - 128
+    - 256
+    - 512
+  attention_head_dim: 8        # 注意力头维度
+
+# ============== VAE (Latent Diffusion) ==============
+vae:
+  use_vae: true               # 是否使用VAE进行潜在扩散
+  vae_path: CompVis/stable-diffusion-v1-4               # 预训练VAE路径
+  latent_channels_per_modality: 4
+
+# ============== Flow Matching ==============
+flow_matching:
+  sigma_min: 0.0001            # 最小噪声水平
+  path_type: linear            # 可选: linear, vp, vp_simple
+
+# ============== DDPM ==============
+ddpm:
+  num_timesteps: 1000          # 扩散时间步数
+  beta_schedule: linear        # 可选: linear, cosine, scaled_linear
+  prediction_type: epsilon     # 可选: epsilon, sample, v_prediction
+
+# ============== Training ==============
+training:
+  batch_size: 64
+  epochs: 100
+  learning_rate: 2.5e-5
+  weight_decay: 0.0
+  beta1: 0.9
+  beta2: 0.999
+  max_grad_norm: 10000.0           # 梯度裁剪
+  ema_decay: 0            # EMA衰减率 (设为0禁用)
+
+# ============== Logging & Checkpointing ==============
+logging:
+  output_dir: ./NYUDepth_output
+  log_interval: 100            # 日志记录间隔(步)
+  save_interval: 5000          # 保存检查点间隔(步)
+  eval_interval: 1000          # 评估间隔(步)
+
+# ============== Other ==============
+other:
+  device: cuda:1
+  num_workers: 4
+  seed: 42
+  resume_from: null            # 恢复训练的检查点路径

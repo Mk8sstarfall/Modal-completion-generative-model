@@ -8,7 +8,7 @@ Reference: "Denoising Diffusion Probabilistic Models" (Ho et al., 2020)
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import Dict, Any, Optional, Union
+from typing import Dict, Any, Optional, Union, List
 from .base_model import BaseGenerativeModel
 from utils.modal_utils import (
     task_to_binary_mask,
@@ -34,6 +34,8 @@ class DDPMModel(BaseGenerativeModel):
                  beta_start: float = 1e-4,
                  beta_end: float = 0.02,
                  prediction_type: str = 'epsilon',
+                 vae: Optional[nn.Module] = None,
+                 data_channels_per_modality: Optional[Union[int, List[int]]] = None,
                  **kwargs):
         """
         Initialize DDPM model.
@@ -49,7 +51,7 @@ class DDPMModel(BaseGenerativeModel):
             prediction_type: Type of prediction ('epsilon', 'sample', 'v_prediction')
             **kwargs: Additional parameters
         """
-        super().__init__(backbone, num_modalities, channels_per_modality, **kwargs)
+        super().__init__(backbone, num_modalities, channels_per_modality, vae, data_channels_per_modality, **kwargs)
         
         self.num_train_timesteps = num_train_timesteps
         self.beta_schedule = beta_schedule
@@ -197,6 +199,10 @@ class DDPMModel(BaseGenerativeModel):
         """
         batch_size = x_0.shape[0]
         device = x_0.device
+
+        # encode to latent space if using VAE
+        with torch.no_grad():
+            z_0 = self.encode_to_latent(x_0)
         
         # Sample or use provided task mask
         if task_mask is None:
@@ -209,29 +215,29 @@ class DDPMModel(BaseGenerativeModel):
         t = torch.randint(0, self.num_train_timesteps, (batch_size,), device=device).long()
         
         # Sample noise
-        noise = torch.randn_like(x_0)
+        noise = torch.randn_like(z_0)
         
         # Forward diffusion
-        x_t = self.q_sample(x_0, t, noise)
+        z_t = self.q_sample(z_0, t, noise)
         
         # Combine clean and noisy data based on task mask
-        x_input = combine_modalities(x_0, x_t, task_mask, channels_per_modality=self.channels_per_modality)
+        z_input = combine_modalities(z_0, z_t, task_mask, channels_per_modality=self.channels_per_modality)
         
         # Predict
-        prediction = self.forward(x_input, t, task_mask, task_id=task_id)
+        prediction = self.forward(z_input, t, task_mask, task_id=task_id)
         
         # Compute target based on prediction type
         if self.prediction_type == 'epsilon':
             target = noise
         elif self.prediction_type == 'sample':
-            target = x_0
+            target = z_0
         elif self.prediction_type == 'v_prediction':
-            # v = sqrt(alpha_t) * noise - sqrt(1-alpha_t) * x_0
-            sqrt_alphas_cumprod_t = self._extract(self.sqrt_alphas_cumprod, t, x_0.shape)
+            # v = sqrt(alpha_t) * noise - sqrt(1-alpha_t) * z_0
+            sqrt_alphas_cumprod_t = self._extract(self.sqrt_alphas_cumprod, t, z_0.shape)
             sqrt_one_minus_alphas_cumprod_t = self._extract(
-                self.sqrt_one_minus_alphas_cumprod, t, x_0.shape
+                self.sqrt_one_minus_alphas_cumprod, t, z_0.shape
             )
-            target = sqrt_alphas_cumprod_t * noise - sqrt_one_minus_alphas_cumprod_t * x_0
+            target = sqrt_alphas_cumprod_t * noise - sqrt_one_minus_alphas_cumprod_t * z_0
         else:
             raise ValueError(f"Unknown prediction_type: {self.prediction_type}")
         
@@ -242,9 +248,9 @@ class DDPMModel(BaseGenerativeModel):
             loss_mask = loss_mask.repeat_interleave(repeats, dim=1)
         else:
             loss_mask = loss_mask.repeat_interleave(self.channels_per_modality, dim=1)
-        for _ in range(x_0.dim() - 2):
+        for _ in range(z_0.dim() - 2):
             loss_mask = loss_mask.unsqueeze(-1)
-        loss_mask = loss_mask.expand_as(x_0)
+        loss_mask = loss_mask.expand_as(z_0)
         
         # MSE loss weighted by task mask
         mse_loss = ((prediction - target) ** 2) * loss_mask
@@ -262,6 +268,7 @@ class DDPMModel(BaseGenerativeModel):
               task_id: Optional[int] = None,
               num_steps: Optional[int] = None,
               eta: float = 0.0,
+              return_latent: bool = False,
               **kwargs) -> torch.Tensor:
         """
         Generate samples using DDPM or DDIM sampling.
@@ -279,6 +286,10 @@ class DDPMModel(BaseGenerativeModel):
         """
         batch_size = x_condition.shape[0]
         device = x_condition.device
+
+        # encode to latent space if using VAE
+        with torch.no_grad():
+            z_condition = self.encode_to_latent(x_condition)
         
         if num_steps is None:
             num_steps = self.num_train_timesteps
@@ -289,35 +300,35 @@ class DDPMModel(BaseGenerativeModel):
             timesteps = list(range(0, self.num_train_timesteps, step_ratio))[::-1]
         
         # Start from noise
-        x_t = torch.randn_like(x_condition)
-        x_t = combine_modalities(x_condition, x_t, task_mask, channels_per_modality=self.channels_per_modality)
+        z_t = torch.randn_like(z_condition)
+        z_t = combine_modalities(z_condition, z_t, task_mask, channels_per_modality=self.channels_per_modality)
         
         for i, t in enumerate(timesteps):
             t_batch = torch.full((batch_size,), t, device=device, dtype=torch.long)
             
             # Predict noise
-            predicted_noise = self.forward(x_t, t_batch, task_mask, task_id=task_id)
+            predicted_noise = self.forward(z_t, t_batch, task_mask, task_id=task_id)
             
-            # Compute predicted x_0
-            alpha_t = self._extract(self.alphas_cumprod, t_batch, x_t.shape)
+            # Compute predicted z_0
+            alpha_t = self._extract(self.alphas_cumprod, t_batch, z_t.shape)
             sqrt_alpha_t = torch.sqrt(alpha_t)
             sqrt_one_minus_alpha_t = torch.sqrt(1 - alpha_t)
             
             if self.prediction_type == 'epsilon':
-                pred_x_0 = (x_t - sqrt_one_minus_alpha_t * predicted_noise) / sqrt_alpha_t
+                pred_z_0 = (z_t - sqrt_one_minus_alpha_t * predicted_noise) / sqrt_alpha_t
             elif self.prediction_type == 'sample':
-                pred_x_0 = predicted_noise
+                pred_z_0 = predicted_noise
             elif self.prediction_type == 'v_prediction':
-                pred_x_0 = sqrt_alpha_t * x_t - sqrt_one_minus_alpha_t * predicted_noise
+                pred_z_0 = sqrt_alpha_t * z_t - sqrt_one_minus_alpha_t * predicted_noise
             
-            # Clip predicted x_0
-            pred_x_0 = torch.clamp(pred_x_0, -1, 1)
+            # Clip predicted z_0
+            pred_z_0 = torch.clamp(pred_z_0, -1, 1)
             
-            # Compute x_{t-1}
+            # Compute z_{t-1}
             if i < len(timesteps) - 1:
                 t_prev = timesteps[i + 1]
                 t_prev_batch = torch.full((batch_size,), t_prev, device=device, dtype=torch.long)
-                alpha_t_prev = self._extract(self.alphas_cumprod, t_prev_batch, x_t.shape)
+                alpha_t_prev = self._extract(self.alphas_cumprod, t_prev_batch, z_t.shape)
             else:
                 alpha_t_prev = torch.ones_like(alpha_t)
             
@@ -326,16 +337,20 @@ class DDPMModel(BaseGenerativeModel):
             dir_xt = torch.sqrt(1 - alpha_t_prev - eta**2 * (1 - alpha_t)) * predicted_noise
             
             if eta > 0:
-                noise = torch.randn_like(x_t)
+                noise = torch.randn_like(z_t)
                 sigma_t = eta * torch.sqrt((1 - alpha_t_prev) / (1 - alpha_t) * (1 - alpha_t / alpha_t_prev))
-                x_t_prev = sqrt_alpha_t_prev * pred_x_0 + dir_xt + sigma_t * noise
+                z_t_prev = sqrt_alpha_t_prev * pred_z_0 + dir_xt + sigma_t * noise
             else:
-                x_t_prev = sqrt_alpha_t_prev * pred_x_0 + dir_xt
+                z_t_prev = sqrt_alpha_t_prev * pred_z_0 + dir_xt
             
             # Keep condition modalities unchanged
-            x_t = combine_modalities(x_condition, x_t_prev, task_mask, channels_per_modality=self.channels_per_modality)
+            z_t = combine_modalities(z_condition, z_t_prev, task_mask, channels_per_modality=self.channels_per_modality)
         
-        return x_t
+        if return_latent:
+            return z_t
+        
+        # decode back to data space
+        return self.decode_from_latent(z_t)
     
     def get_config(self) -> Dict[str, Any]:
         """Get model configuration."""
