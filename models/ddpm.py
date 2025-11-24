@@ -8,7 +8,7 @@ Reference: "Denoising Diffusion Probabilistic Models" (Ho et al., 2020)
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union
 from .base_model import BaseGenerativeModel
 from utils.modal_utils import (
     task_to_binary_mask,
@@ -28,7 +28,7 @@ class DDPMModel(BaseGenerativeModel):
     def __init__(self,
                  backbone: nn.Module,
                  num_modalities: int,
-                 channels_per_modality: int,
+                 channels_per_modality: Union[int, list[int], torch.Tensor],
                  num_train_timesteps: int = 1000,
                  beta_schedule: str = 'linear',
                  beta_start: float = 1e-4,
@@ -215,7 +215,7 @@ class DDPMModel(BaseGenerativeModel):
         x_t = self.q_sample(x_0, t, noise)
         
         # Combine clean and noisy data based on task mask
-        x_input = combine_modalities(x_0, x_t, task_mask)
+        x_input = combine_modalities(x_0, x_t, task_mask, channels_per_modality=self.channels_per_modality)
         
         # Predict
         prediction = self.forward(x_input, t, task_mask, task_id=task_id)
@@ -237,7 +237,11 @@ class DDPMModel(BaseGenerativeModel):
         
         # Compute loss only on generation modalities
         loss_mask = task_mask.float()
-        loss_mask = loss_mask.repeat_interleave(self.channels_per_modality, dim=1)
+        if isinstance(self.channels_per_modality, list):
+            repeats = torch.tensor(self.channels_per_modality, device=loss_mask.device)
+            loss_mask = loss_mask.repeat_interleave(repeats, dim=1)
+        else:
+            loss_mask = loss_mask.repeat_interleave(self.channels_per_modality, dim=1)
         for _ in range(x_0.dim() - 2):
             loss_mask = loss_mask.unsqueeze(-1)
         loss_mask = loss_mask.expand_as(x_0)
@@ -286,7 +290,7 @@ class DDPMModel(BaseGenerativeModel):
         
         # Start from noise
         x_t = torch.randn_like(x_condition)
-        x_t = combine_modalities(x_condition, x_t, task_mask)
+        x_t = combine_modalities(x_condition, x_t, task_mask, channels_per_modality=self.channels_per_modality)
         
         for i, t in enumerate(timesteps):
             t_batch = torch.full((batch_size,), t, device=device, dtype=torch.long)
@@ -329,7 +333,7 @@ class DDPMModel(BaseGenerativeModel):
                 x_t_prev = sqrt_alpha_t_prev * pred_x_0 + dir_xt
             
             # Keep condition modalities unchanged
-            x_t = combine_modalities(x_condition, x_t_prev, task_mask)
+            x_t = combine_modalities(x_condition, x_t_prev, task_mask, channels_per_modality=self.channels_per_modality)
         
         return x_t
     

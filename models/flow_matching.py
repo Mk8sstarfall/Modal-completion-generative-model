@@ -7,7 +7,7 @@ Reference: "Flow Matching for Generative Modeling" (Lipman et al., 2023)
 
 import torch
 import torch.nn as nn
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable, Union
 from .base_model import BaseGenerativeModel
 from utils.modal_utils import (
     task_to_binary_mask, 
@@ -27,7 +27,7 @@ class FlowMatchingModel(BaseGenerativeModel):
     def __init__(self,
                  backbone: nn.Module,
                  num_modalities: int,
-                 channels_per_modality: int,
+                 channels_per_modality: Union[int, list[int], torch.Tensor],
                  sigma_min: float = 1e-4,
                  path_type: str = 'linear',
                  **kwargs):
@@ -165,14 +165,18 @@ class FlowMatchingModel(BaseGenerativeModel):
             raise ValueError(f"Unknown path_type: {self.path_type}")
         
         # Combine clean and noisy data based on task mask
-        x_input = combine_modalities(x_0, x_t, task_mask)
+        x_input = combine_modalities(x_0, x_t, task_mask, channels_per_modality=self.channels_per_modality)
         
         # Predict velocity
         v_pred = self.forward(x_input, t, task_mask, task_id=task_id)
         
         # Compute loss only on generation modalities
         loss_mask = task_mask.float()
-        loss_mask = loss_mask.repeat_interleave(self.channels_per_modality, dim=1)
+        if isinstance(self.channels_per_modality, list):
+            repeats = torch.tensor(self.channels_per_modality, device=loss_mask.device)
+            loss_mask = loss_mask.repeat_interleave(repeats, dim=1)
+        else:
+            loss_mask = loss_mask.repeat_interleave(self.channels_per_modality, dim=1)
         for _ in range(x_0.dim() - 2):
             loss_mask = loss_mask.unsqueeze(-1)
         loss_mask = loss_mask.expand_as(x_0)
@@ -213,7 +217,7 @@ class FlowMatchingModel(BaseGenerativeModel):
         
         # Start from noise
         x_t = torch.randn_like(x_condition)
-        x_t = combine_modalities(x_condition, x_t, task_mask)
+        x_t = combine_modalities(x_condition, x_t, task_mask, channels_per_modality=self.channels_per_modality)
         
         # Time steps
         dt = 1.0 / num_steps
@@ -250,7 +254,7 @@ class FlowMatchingModel(BaseGenerativeModel):
                 raise ValueError(f"Unknown method: {method}")
             
             # Keep condition modalities unchanged
-            x_t = combine_modalities(x_condition, x_t_next, task_mask)
+            x_t = combine_modalities(x_condition, x_t_next, task_mask, channels_per_modality=self.channels_per_modality)
         
         return x_t
     

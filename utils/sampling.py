@@ -6,7 +6,7 @@ Provides functions for generating samples from trained models.
 
 import torch
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 from pathlib import Path
 import matplotlib.pyplot as plt
 from models.base_model import BaseGenerativeModel
@@ -102,7 +102,7 @@ def visualize_samples(
     generated: torch.Tensor,
     task_mask: torch.Tensor,
     num_modalities: int,
-    channels_per_modality: int,
+    channels_per_modality: Union[int, List[int]],
     save_path: Optional[Path] = None,
     modality_names: Optional[List[str]] = None,
     task_id: Optional[int] = None,
@@ -135,8 +135,13 @@ def visualize_samples(
     generated_np = (generated_np - generated_np.min()) / (generated_np.max() - generated_np.min() + 1e-8)
     
     # Split into modalities
-    original_mods = np.split(original_np, num_modalities, axis=0)
-    generated_mods = np.split(generated_np, num_modalities, axis=0)
+    if isinstance(channels_per_modality, int):
+        original_mods = np.split(original_np, num_modalities, axis=0)
+        generated_mods = np.split(generated_np, num_modalities, axis=0)
+    else:
+        split_indices = np.cumsum(channels_per_modality)[:-1]
+        original_mods = np.split(original_np, split_indices, axis=0)
+        generated_mods = np.split(generated_np, split_indices, axis=0)
     task_mask_np = task_mask.cpu().numpy()
     
     # Create figure
@@ -185,23 +190,20 @@ def compute_generation_metrics(
     original: torch.Tensor,
     generated: torch.Tensor,
     task_mask: torch.Tensor,
+    channels_per_modality: Union[int, List[int], torch.Tensor],
     metrics: List[str] = ['mse', 'psnr', 'mae']
 ) -> Dict[str, float]:
-    """
-    Compute metrics for generated modalities.
-    
-    Args:
-        original: Original data
-        generated: Generated data
-        task_mask: Task mask indicating which modalities were generated
-        metrics: List of metrics to compute
-        
-    Returns:
-        Dictionary of metric values
-    """
-    # Expand task mask to match spatial dimensions
     mask = task_mask.float()
-    for _ in range(original.dim() - task_mask.dim()):
+    
+    # Expand to channel dimension first
+    if isinstance(channels_per_modality, list):
+        repeats = torch.tensor(channels_per_modality, device=mask.device)
+        mask = mask.repeat_interleave(repeats)
+    else:
+        mask = mask.repeat_interleave(channels_per_modality)
+    
+    # Then expand to spatial dimensions
+    for _ in range(original.dim() - 1):
         mask = mask.unsqueeze(-1)
     mask = mask.expand_as(original)
     
@@ -279,11 +281,14 @@ def evaluate_model(
                 )
                 
                 # Compute metrics for each sample
+                config = model.get_config()
+                channels_per_modality = config['channels_per_modality']
                 for i in range(batch_size):
                     metrics = compute_generation_metrics(
                         x_full[i],
                         generated[i],
-                        task_mask[i]
+                        task_mask[i],
+                        channels_per_modality=channels_per_modality,
                     )
                     
                     for key, value in metrics.items():

@@ -156,7 +156,10 @@ def load_model_from_checkpoint(checkpoint_path: str, device: str = 'cuda'):
         print("Detected DDPM model")
     
     # Extract UNet configuration from config
-    total_channels = config['num_modalities'] * config['channels_per_modality']
+    if isinstance(config['channels_per_modality'], int):
+        total_channels = config['num_modalities'] * config['channels_per_modality']
+    else:
+        total_channels = sum(config['channels_per_modality'])
     
     # Get UNet channels from config or use defaults
     unet_channels = config.get('unet_channels', [64, 128, 256, 512])
@@ -463,6 +466,18 @@ def evaluate_model_performance(args):
     print(f"\nResults saved to {output_dir / 'evaluation_results.json'}")
 
 
+def parse_channel_value(value):
+    if isinstance(value, int):
+        return value
+    try:
+        if value.startswith('[') and value.endswith(']'):
+            value = value[1:-1]
+        values = [int(x.strip()) for x in value.split(',')]
+        return values if len(values) > 1 else values[0]
+    except:
+        raise
+
+
 def setup_parser():
     """Setup argument parser with dynamically discovered datasets."""
     parser = argparse.ArgumentParser(
@@ -546,7 +561,7 @@ def setup_parser():
     )
     config_group.add_argument(
         '--channels_per_modality', 
-        type=int, 
+        type=parse_channel_value, 
         default=None,
         help='Channels per modality (usually inferred from checkpoint)'
     )

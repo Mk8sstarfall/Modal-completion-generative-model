@@ -6,7 +6,7 @@ Users should inherit from this class and implement the abstract methods.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Tuple, Optional, List, Union
 import torch
 from torch.utils.data import Dataset
 import numpy as np
@@ -25,7 +25,7 @@ class BaseModalDataset(Dataset, ABC):
     def __init__(self,
                  data_root: str,
                  num_modalities: int,
-                 channels_per_modality: int,
+                 channels_per_modality: Union[int, List[int]],
                  transform: Optional[callable] = None,
                  normalize: bool = True,
                  normalization_range: Tuple[float, float] = (-1.0, 1.0)):
@@ -43,10 +43,13 @@ class BaseModalDataset(Dataset, ABC):
         self.data_root = data_root
         self.num_modalities = num_modalities
         self.channels_per_modality = channels_per_modality
-        self.total_channels = num_modalities * channels_per_modality
         self.transform = transform
         self.normalize = normalize
         self.normalization_range = normalization_range
+        if isinstance(self.channels_per_modality, int):
+            self.total_channels = self.channels_per_modality * self.num_modalities
+        else:
+            self.total_channels = sum(self.channels_per_modality)
         
     @abstractmethod
     def __len__(self) -> int:
@@ -195,81 +198,3 @@ class BaseModalDataset(Dataset, ABC):
             for name, mod in zip(modality_names, modalities)
         }
 
-
-class SyntheticModalDataset(BaseModalDataset):
-    """
-    Synthetic dataset for testing and development.
-    
-    Generates random multi-modal data on the fly.
-    """
-    
-    def __init__(self,
-                 num_samples: int = 1000,
-                 num_modalities: int = 4,
-                 channels_per_modality: int = 1,
-                 image_size: int = 64,
-                 **kwargs):
-        """
-        Initialize synthetic dataset.
-        
-        Args:
-            num_samples: Number of samples to generate
-            num_modalities: Number of modalities
-            channels_per_modality: Channels per modality
-            image_size: Size of generated images (square)
-            **kwargs: Additional arguments for BaseModalDataset
-        """
-        super().__init__(
-            data_root='synthetic',
-            num_modalities=num_modalities,
-            channels_per_modality=channels_per_modality,
-            **kwargs
-        )
-        self.num_samples = num_samples
-        self.image_size = image_size
-        
-    def __len__(self) -> int:
-        return self.num_samples
-    
-    def _load_sample(self, idx: int) -> Dict[str, torch.Tensor]:
-        """
-        Generate a random synthetic sample.
-        
-        Args:
-            idx: Sample index (used as seed)
-            
-        Returns:
-            Dictionary with synthetic data
-        """
-        # Set seed for reproducibility
-        rng = np.random.RandomState(idx)
-        
-        # Generate random data for each modality
-        modalities = []
-        for i in range(self.num_modalities):
-            # Create correlated patterns between modalities
-            base_pattern = rng.randn(self.image_size, self.image_size)
-            modality_data = np.zeros((self.channels_per_modality, self.image_size, self.image_size))
-            
-            for c in range(self.channels_per_modality):
-                # Add some structure with Gaussian blobs
-                modality_data[c] = base_pattern + rng.randn(self.image_size, self.image_size) * 0.3
-        
-            modalities.append(torch.from_numpy(modality_data).float())
-        
-        # Concatenate all modalities
-        data = torch.cat(modalities, dim=0)
-        
-        return {
-            'data': data,
-            'modalities': modalities,
-            'idx': idx,
-        }
-    
-    def get_modality_info(self) -> Dict[str, any]:
-        """Get information about synthetic modalities."""
-        return {
-            'names': [f'Modality_{i}' for i in range(self.num_modalities)],
-            'channels': [self.channels_per_modality] * self.num_modalities,
-            'type': 'synthetic',
-        }

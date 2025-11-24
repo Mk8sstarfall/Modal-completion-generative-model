@@ -134,7 +134,10 @@ def create_model(args):
         Model instance
     """
     # Calculate total channels
-    total_channels = args.num_modalities * args.channels_per_modality
+    if isinstance(args.channels_per_modality, int):
+        total_channels = args.num_modalities * args.channels_per_modality
+    else:
+        total_channels = sum(args.channels_per_modality)
     
     # Create backbone
     backbone = create_unet_backbone(
@@ -308,6 +311,18 @@ def main(args):
     trainer.train(num_epochs=args.epochs)
 
 
+def parse_channel_value(value):
+    if isinstance(value, int):
+        return value
+    try:
+        if value.startswith('[') and value.endswith(']'):
+            value = value[1:-1]
+        values = [int(x.strip()) for x in value.split(',')]
+        return values if len(values) > 1 else values[0]
+    except:
+        raise
+
+
 def setup_parser():
     """Setup argument parser with dynamically discovered datasets."""
     parser = argparse.ArgumentParser(
@@ -346,7 +361,7 @@ def setup_parser():
                             help='Type of generative model')
     model_group.add_argument('--num_modalities', type=int, default=4,
                             help='Number of modalities')
-    model_group.add_argument('--channels_per_modality', type=int, default=1,
+    model_group.add_argument('--channels_per_modality', type=parse_channel_value, default=1,
                             help='Number of channels per modality')
     model_group.add_argument('--unet_channels', nargs='+', type=int,
                             default=[64, 128, 256, 512],

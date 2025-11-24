@@ -86,12 +86,8 @@ class Trainer:
         
     def _create_ema_model(self) -> nn.Module:
         """Create EMA version of the model."""
-        ema_model = type(self.model)(
-            backbone=self.model.backbone,
-            num_modalities=self.model.num_modalities,
-            channels_per_modality=self.model.channels_per_modality,
-        ).to(self.device)
-        ema_model.load_state_dict(self.model.state_dict())
+        import copy
+        ema_model = copy.deepcopy(self.model)
         ema_model.eval()
         return ema_model
     

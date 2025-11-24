@@ -7,7 +7,7 @@ where each bit indicates whether a modality is a condition (0) or target for gen
 
 import torch
 import numpy as np
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Union
 
 
 def task_to_binary_mask(task_id: int, num_modalities: int) -> torch.Tensor:
@@ -73,7 +73,8 @@ def sample_random_task(num_modalities: int,
 def combine_modalities(x_clean: torch.Tensor,
                        x_noisy: torch.Tensor,
                        task_mask: torch.Tensor,
-                       channel_dim: int = 1) -> torch.Tensor:
+                       channel_dim: int = 1,
+                       channels_per_modality: Optional[Union[int, list[int], torch.Tensor]] = None,) -> torch.Tensor:
     """
     Combine clean (condition) and noisy (generation target) modalities based on task mask.
     
@@ -101,9 +102,11 @@ def combine_modalities(x_clean: torch.Tensor,
     expanded_mask = task_mask.view(*mask_shape)
     
     # Repeat mask for each channel within modality
-    channels_per_modality = x_clean.shape[channel_dim] // num_modalities
-    if channels_per_modality > 1:
-        expanded_mask = expanded_mask.repeat_interleave(channels_per_modality, dim=channel_dim)
+    if channels_per_modality is None:
+        channels_per_modality = x_clean.shape[channel_dim] // num_modalities
+    if isinstance(channels_per_modality, list):
+        channels_per_modality = torch.tensor(channels_per_modality, device=expanded_mask.device)
+    expanded_mask = expanded_mask.repeat_interleave(channels_per_modality, dim=channel_dim)
     
     # Expand to all spatial dimensions
     """for dim in range(channel_dim + 1, x_clean.dim()):
@@ -117,7 +120,7 @@ def combine_modalities(x_clean: torch.Tensor,
 
 def get_generation_mask(task_id: int, 
                        num_modalities: int,
-                       channels_per_modality: int,
+                       channels_per_modality: Union[int, list[int], torch.Tensor],
                        spatial_shape: Tuple[int, ...],
                        device: torch.device) -> torch.Tensor:
     """
@@ -136,6 +139,8 @@ def get_generation_mask(task_id: int,
     task_mask = task_to_binary_mask(task_id, num_modalities)
     
     # Expand to channel dimension
+    if isinstance(channels_per_modality, list):
+        channels_per_modality = torch.tensor(channels_per_modality, device=task_mask.device)
     channel_mask = task_mask.repeat_interleave(channels_per_modality)
     
     # Expand to spatial dimensions
@@ -143,37 +148,6 @@ def get_generation_mask(task_id: int,
     mask = mask.expand(1, -1, *spatial_shape)
     
     return mask.to(device)
-
-
-def validate_task_config(num_modalities: int, 
-                        total_channels: int,
-                        task_id: Optional[int] = None) -> None:
-    """
-    Validate task configuration parameters.
-    
-    Args:
-        num_modalities: Number of modalities
-        total_channels: Total number of channels
-        task_id: Optional task ID to validate
-        
-    Raises:
-        ValueError: If configuration is invalid
-    """
-    if num_modalities < 1:
-        raise ValueError(f"num_modalities must be >= 1, got {num_modalities}")
-    
-    if total_channels % num_modalities != 0:
-        raise ValueError(
-            f"total_channels ({total_channels}) must be divisible by "
-            f"num_modalities ({num_modalities})"
-        )
-    
-    if task_id is not None:
-        max_task = 2 ** num_modalities - 1
-        if not (0 <= task_id <= max_task):
-            raise ValueError(
-                f"task_id must be in range [0, {max_task}], got {task_id}"
-            )
 
 
 def get_task_description(task_id: int, 

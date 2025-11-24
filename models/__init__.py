@@ -1,13 +1,11 @@
 """Models package initialization."""
 
-from .base_model import BaseGenerativeModel, TimeEmbedding, TaskEmbedding
+from .base_model import BaseGenerativeModel
 from .flow_matching import FlowMatchingModel
 from .ddpm import DDPMModel
 
 __all__ = [
     'BaseGenerativeModel',
-    'TimeEmbedding',
-    'TaskEmbedding',
     'FlowMatchingModel',
     'DDPMModel',
 ]

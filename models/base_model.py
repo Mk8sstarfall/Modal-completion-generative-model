@@ -6,7 +6,7 @@ must implement for modal completion tasks.
 """
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
@@ -19,7 +19,7 @@ class BaseGenerativeModel(ABC, nn.Module):
     def __init__(self,
                  backbone: nn.Module,
                  num_modalities: int,
-                 channels_per_modality: int,
+                 channels_per_modality: Union[int, list[int], torch.Tensor],
                  **kwargs):
         """
         Initialize base generative model.
@@ -34,7 +34,12 @@ class BaseGenerativeModel(ABC, nn.Module):
         self.backbone = backbone
         self.num_modalities = num_modalities
         self.channels_per_modality = channels_per_modality
-        self.total_channels = num_modalities * channels_per_modality
+        if isinstance(channels_per_modality, int):
+            self.total_channels = num_modalities * channels_per_modality
+        elif isinstance(channels_per_modality, list):
+            self.total_channels = sum(channels_per_modality)
+        else:  # torch.Tensor
+            self.total_channels = channels_per_modality.sum().item()
         
     @abstractmethod
     def forward(self,
@@ -116,18 +121,16 @@ class BaseGenerativeModel(ABC, nn.Module):
             Combined input tensor
         """
         from ..utils.modal_utils import combine_modalities
-        return combine_modalities(x_clean, x_noisy, task_mask)
+        return combine_modalities(x_clean, x_noisy, task_mask, channels_per_modality=self.channels_per_modality)
     
     def get_config(self) -> Dict[str, Any]:
-        """
-        Get model configuration for saving/loading.
-        
-        Returns:
-            Configuration dictionary
-        """
+        if isinstance(self.channels_per_modality, torch.Tensor):
+            cpm = self.channels_per_modality.tolist()
+        else:
+            cpm = self.channels_per_modality
         return {
             'num_modalities': self.num_modalities,
-            'channels_per_modality': self.channels_per_modality,
+            'channels_per_modality': cpm,
             'total_channels': self.total_channels,
         }
     
@@ -144,64 +147,3 @@ class BaseGenerativeModel(ABC, nn.Module):
             Model instance
         """
         return cls(backbone=backbone, **config)
-
-
-class TimeEmbedding(nn.Module):
-    """
-    Sinusoidal time embedding module.
-    """
-    
-    def __init__(self, embedding_dim: int, max_period: float = 10000.0):
-        super().__init__()
-        self.embedding_dim = embedding_dim
-        self.max_period = max_period
-        
-    def forward(self, t: torch.Tensor) -> torch.Tensor:
-        """
-        Create sinusoidal time embeddings.
-        
-        Args:
-            t: Time steps, shape (B,) or (B, 1), values in [0, 1]
-            
-        Returns:
-            Time embeddings, shape (B, embedding_dim)
-        """
-        if t.dim() == 2:
-            t = t.squeeze(-1)
-            
-        half_dim = self.embedding_dim // 2
-        embeddings = torch.exp(
-            -torch.log(torch.tensor(self.max_period)) * 
-            torch.arange(half_dim, dtype=torch.float32, device=t.device) / half_dim
-        )
-        embeddings = t[:, None] * embeddings[None, :]
-        embeddings = torch.cat([torch.sin(embeddings), torch.cos(embeddings)], dim=-1)
-        
-        if self.embedding_dim % 2 == 1:
-            embeddings = torch.cat([embeddings, torch.zeros_like(embeddings[:, :1])], dim=-1)
-            
-        return embeddings
-
-
-class TaskEmbedding(nn.Module):
-    """
-    Embedding module for task masks.
-    """
-    
-    def __init__(self, num_modalities: int, embedding_dim: int):
-        super().__init__()
-        self.num_modalities = num_modalities
-        self.embedding_dim = embedding_dim
-        self.embed = nn.Linear(num_modalities, embedding_dim)
-        
-    def forward(self, task_mask: torch.Tensor) -> torch.Tensor:
-        """
-        Embed task mask into continuous representation.
-        
-        Args:
-            task_mask: Binary task mask, shape (B, num_modalities)
-            
-        Returns:
-            Task embeddings, shape (B, embedding_dim)
-        """
-        return self.embed(task_mask.float())
